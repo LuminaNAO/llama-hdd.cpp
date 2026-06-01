@@ -91,6 +91,11 @@ struct common_log_entry {
             return COMMON_LOG_COL_YELLOW;
         }
 
+        if (strstr(msg, "prompt processing,") &&
+            strstr(msg, "progress =")) {
+            return COMMON_LOG_COL_CYAN;
+        }
+
         return COMMON_LOG_COL_DEFAULT;
     }
 
