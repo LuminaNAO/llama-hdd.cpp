@@ -91,12 +91,30 @@ struct common_log_entry {
             return COMMON_LOG_COL_YELLOW;
         }
 
-        if (strstr(msg, "prompt processing,") &&
-            strstr(msg, "progress =")) {
-            return COMMON_LOG_COL_CYAN;
+        return COMMON_LOG_COL_DEFAULT;
+    }
+
+    static bool print_progress_highlight(FILE * fcur, const char * msg) {
+        if (!strstr(msg, "prompt processing,")) {
+            return false;
         }
 
-        return COMMON_LOG_COL_DEFAULT;
+        const char * progress = strstr(msg, "progress =");
+        if (!progress) {
+            return false;
+        }
+
+        const char * end = strchr(progress, ',');
+        if (!end) {
+            end = progress + strlen(progress);
+        }
+
+        fwrite(msg, 1, progress - msg, fcur);
+        fprintf(fcur, "%s", g_col[COMMON_LOG_COL_CYAN]);
+        fwrite(progress, 1, end - progress, fcur);
+        fprintf(fcur, "%s", g_col[COMMON_LOG_COL_DEFAULT]);
+        fprintf(fcur, "%s", end);
+        return true;
     }
 
     void print(FILE * file = nullptr) const {
@@ -141,7 +159,11 @@ struct common_log_entry {
         if (msg_col != COMMON_LOG_COL_DEFAULT) {
             fprintf(fcur, "%s", g_col[msg_col]);
         }
-        fprintf(fcur, "%s", msg.data());
+        if (msg_col == COMMON_LOG_COL_DEFAULT && print_progress_highlight(fcur, msg.data())) {
+            // Printed above with only the progress fragment highlighted.
+        } else {
+            fprintf(fcur, "%s", msg.data());
+        }
 
         if (msg_col != COMMON_LOG_COL_DEFAULT ||
             level == GGML_LOG_LEVEL_WARN || level == GGML_LOG_LEVEL_ERROR || level == GGML_LOG_LEVEL_DEBUG) {
