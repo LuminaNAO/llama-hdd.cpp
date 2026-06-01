@@ -73,6 +73,27 @@ struct common_log_entry {
     // signals the worker thread to stop
     bool is_end;
 
+    static int content_color(const char * msg) {
+        // Keep important cache/checkpoint lines visible across logger format
+        // changes. These match message content, not the leading level/function
+        // prefix, because llama.cpp's prefix format changes upstream.
+        if (strstr(msg, "checkpoint sidecar") ||
+            strstr(msg, "sidecar size") ||
+            strstr(msg, "slot save") ||
+            strstr(msg, "slot restore")) {
+            return COMMON_LOG_COL_MAGENTA;
+        }
+
+        if (strstr(msg, "context checkpoint") ||
+            strstr(msg, "speculative checkpoint") ||
+            strstr(msg, "restore checkpoint") ||
+            strstr(msg, "checkpoints")) {
+            return COMMON_LOG_COL_YELLOW;
+        }
+
+        return COMMON_LOG_COL_DEFAULT;
+    }
+
     void print(FILE * file = nullptr) const {
         FILE * fcur = file;
         if (!fcur) {
@@ -111,9 +132,14 @@ struct common_log_entry {
             }
         }
 
+        const int msg_col = content_color(msg.data());
+        if (msg_col != COMMON_LOG_COL_DEFAULT) {
+            fprintf(fcur, "%s", g_col[msg_col]);
+        }
         fprintf(fcur, "%s", msg.data());
 
-        if (level == GGML_LOG_LEVEL_WARN || level == GGML_LOG_LEVEL_ERROR || level == GGML_LOG_LEVEL_DEBUG) {
+        if (msg_col != COMMON_LOG_COL_DEFAULT ||
+            level == GGML_LOG_LEVEL_WARN || level == GGML_LOG_LEVEL_ERROR || level == GGML_LOG_LEVEL_DEBUG) {
             fprintf(fcur, "%s", g_col[COMMON_LOG_COL_DEFAULT]);
         }
 
