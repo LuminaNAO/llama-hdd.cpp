@@ -8,7 +8,7 @@ Upstream's `--slot-save-path` persists slot KV across restarts but does **not** 
 
 This fork adds an `LSCKPT2` sidecar (`<slotfile>.ckpt`) that serializes the checkpoint list alongside the main slot blob. The behavior is automatic and transparent: any `--slot-save-path` user gets it with no flag changes. Particularly valuable for unified-memory systems where holding large KV caches in RAM eats into model space.
 
-Pairs naturally with [llamacpp-helper](https://codeberg.org/LuminaNAO/llamacpp-helper) (`--hdd-cache` mode), which provides the LRU eviction and partition-management policy layer on top.
+Pairs naturally with [llama-launcher](https://codeberg.org/LuminaNAO/llama-launcher) (`--hdd-cache` mode), which provides the LRU eviction and partition-management policy layer on top.
 
 ## Install
 
