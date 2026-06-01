@@ -1,5 +1,7 @@
 # llama-hdd.cpp
 
+> **⚠️ This GitHub repository is a read-only mirror.** The primary repository is on [Codeberg](https://codeberg.org/LuminaNAO/llama-hdd.cpp). Please raise issues and submit pull requests there — submissions to this GitHub mirror will be ignored.
+
 A soft fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) that adds **disk-backed prompt-checkpoint persistence** to `llama-server`. Tracks upstream closely; the only divergence is a small set of patches centered on the `.ckpt` sidecar feature.
 
 ## Why this fork exists
