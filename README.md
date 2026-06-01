@@ -1,4 +1,31 @@
-# llama.cpp
+# llama-hdd.cpp
+
+A soft fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) that adds **disk-backed prompt-checkpoint persistence** to `llama-server`. Tracks upstream closely; the only divergence is a small set of patches centered on the `.ckpt` sidecar feature.
+
+## Why this fork exists
+
+Upstream's `--slot-save-path` persists slot KV across restarts but does **not** persist the `common_prompt_checkpoint` list. On hybrid-arch / MTP models that rely on prompt checkpoints to avoid cold prefill when switching prompts, restoring a slot from disk without its checkpoints means the model still re-prefills from scratch — defeating the point.
+
+This fork adds an `LSCKPT2` sidecar (`<slotfile>.ckpt`) that serializes the checkpoint list alongside the main slot blob. The behavior is automatic and transparent: any `--slot-save-path` user gets it with no flag changes. Particularly valuable for unified-memory systems where holding large KV caches in RAM eats into model space.
+
+Pairs naturally with [llamacpp-helper](https://codeberg.org/LuminaNAO/llamacpp-helper) (`--hdd-cache` mode), which provides the LRU eviction and partition-management policy layer on top.
+
+## Install
+
+```sh
+paru -S llama-hdd       # conflicts with / provides llama.cpp
+```
+
+Binary names and CLI are unchanged from upstream — `llama-server`, `llama-cli`, etc. all behave identically except for the sidecar emission.
+
+## Relation to upstream
+
+- `master` tracks `upstream/master` with the fork patches layered on top
+- Upstream is merged in regularly; report bugs in fork-specific code here, everything else upstream
+
+---
+
+# llama.cpp (upstream README below)
 
 ![llama](https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png)
 
