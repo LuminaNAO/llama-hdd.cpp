@@ -1,4 +1,34 @@
-# llama.cpp
+# llama-hdd.cpp
+
+> **⚠️ This GitHub repository is a read-only mirror.** The primary repository is on [Codeberg](https://codeberg.org/LuminaNAO/llama-hdd.cpp). Please raise issues and submit pull requests there — submissions to this GitHub mirror will be ignored.
+
+A soft fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) that adds **disk-backed prompt-checkpoint persistence** to `llama-server`. Tracks upstream closely; the only divergence is a small set of patches centered on the `.ckpt` sidecar feature.
+
+## Why this fork exists
+
+Upstream's `--slot-save-path` persists slot KV across restarts but does **not** persist the `common_prompt_checkpoint` list. On hybrid-arch / MTP models that rely on prompt checkpoints to avoid cold prefill when switching prompts, restoring a slot from disk without its checkpoints means the model still re-prefills from scratch — defeating the point.
+
+This fork adds an `LSCKPT2` sidecar (`<slotfile>.ckpt`) that serializes the checkpoint list alongside the main slot blob. The behavior is automatic and transparent: any `--slot-save-path` user gets it with no flag changes. Particularly valuable for unified-memory systems where holding large KV caches in RAM eats into model space.
+
+Pairs naturally with [llama-launcher](https://codeberg.org/LuminaNAO/llama-launcher) (`--hdd-cache` mode), which provides the LRU eviction and partition-management policy layer on top.
+
+## Install
+
+```sh
+paru -S llama-hdd       # conflicts with / provides llama.cpp
+```
+
+Binary names and CLI are unchanged from upstream — `llama-server`, `llama-cli`, etc. all behave identically except for the sidecar emission.
+
+## Relation to upstream
+
+- `master` tracks `upstream/master` with the fork patches layered on top
+- Upstream is merged in regularly; report bugs in fork-specific code here, everything else upstream
+
+---
+
+# llama.cpp (upstream README below)
+
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
