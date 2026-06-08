@@ -1,12 +1,39 @@
-# llama.cpp
+# llama-hdd.cpp
+
+> **⚠️ This GitHub repository is a read-only mirror.** The primary repository is on [Codeberg](https://codeberg.org/LuminaNAO/llama-hdd.cpp). Please raise issues and submit pull requests there — submissions to this GitHub mirror will be ignored.
+
+A soft fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) that adds **disk-backed prompt-checkpoint persistence** to `llama-server`. Tracks upstream closely; the only divergence is a small set of patches centered on the `.ckpt` sidecar feature.
+
+## Why this fork exists
+
+Upstream's `--slot-save-path` persists slot KV across restarts but does **not** persist the `common_prompt_checkpoint` list. On hybrid-arch / MTP models that rely on prompt checkpoints to avoid cold prefill when switching prompts, restoring a slot from disk without its checkpoints means the model still re-prefills from scratch — defeating the point.
+
+This fork adds an `LSCKPT2` sidecar (`<slotfile>.ckpt`) that serializes the checkpoint list alongside the main slot blob. The behavior is automatic and transparent: any `--slot-save-path` user gets it with no flag changes. Particularly valuable for unified-memory systems where holding large KV caches in RAM eats into model space.
+
+Pairs naturally with [llama-launcher](https://codeberg.org/LuminaNAO/llama-launcher) (`--hdd-cache` mode), which provides the LRU eviction and partition-management policy layer on top.
+
+## Install
+
+```sh
+paru -S llama-hdd       # conflicts with / provides llama.cpp
+```
+
+Binary names and CLI are unchanged from upstream — `llama-server`, `llama-cli`, etc. all behave identically except for the sidecar emission.
+
+## Relation to upstream
+
+- `master` tracks `upstream/master` with the fork patches layered on top
+- Upstream is merged in regularly; report bugs in fork-specific code here, everything else upstream
+
+---
+
+# llama.cpp (upstream README below)
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp)](https://github.com/ggml-org/llama.cpp/releases)
 [![Server](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml)
-[![Docker](https://github.com/ggml-org/llama.cpp/actions/workflows/docker.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/docker.yml)
-[![Winget](https://github.com/ggml-org/llama.cpp/actions/workflows/winget.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/winget.yml)
 
 [Manifesto](https://github.com/ggml-org/llama.cpp/discussions/205) / [ggml](https://github.com/ggml-org/ggml) / [ops](https://github.com/ggml-org/llama.cpp/blob/master/docs/ops.md) / [maintainer PRs](https://github.com/ggml-org/llama.cpp/issues?q=is%3Apr%20is%3Aopen%20draft%3AFalse%20(author%3Argerganov%20OR%20author%3AKitaitiMakoto%20OR%20author%3Adanbev%20OR%20author%3Aaldehir%20OR%20author%3Amax-krasnyansky%20OR%20author%3ACISC%20OR%20author%3Aggerganov%20OR%20author%3Aam17an%20OR%20author%3Abartowski1182%20OR%20author%3Ahipudding%20OR%20author%3AServeurpersoCom%20OR%20author%3Apwilkin%20OR%20author%3Areeselevine%20OR%20author%3Angxson%20OR%20author%3Ajeffbolznv%20OR%20author%3A0cc4m%20OR%20author%3Aangt%20OR%20author%3AIMbackK%20OR%20author%3Aarthw%20OR%20author%3AJohannesGaessler%20OR%20author%3AORippler%20OR%20author%3Aruixiang63%20OR%20author%3Axctan%20OR%20author%3Aallozaur%20OR%20author%3Ayomaytk%20OR%20author%3Aaendk%20OR%20author%3Agaugarg-nv%20OR%20author%3Ataronaeo%20OR%20author%3Aforforever73%20OR%20author%3Alhez%20OR%20author%3Anetrunnereve%20OR%20author%3Afairydreaming)%20sort%3Aupdated-desc)
 
@@ -147,7 +174,6 @@ Instructions for adding support for new models: [HOWTO-add-model.md](docs/develo
 - [x] [Liquid Nanos](https://huggingface.co/collections/LiquidAI/liquid-nanos)
 - [x] [Hunyuan models](https://huggingface.co/collections/tencent/hunyuan-dense-model-6890632cda26b19119c9c5e7)
 - [x] [BailingMoeV2 (Ring/Ling 2.0) models](https://huggingface.co/collections/inclusionAI/ling-v2-68bf1dd2fc34c306c1fa6f86)
-- [x] [Mellum models](https://huggingface.co/JetBrains/models?search=mellum)
 
 #### Multimodal
 
