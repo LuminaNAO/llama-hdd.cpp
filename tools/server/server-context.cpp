@@ -2224,6 +2224,26 @@ private:
                 cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
     }
 
+    bool can_create_context_checkpoint(const server_slot & slot) const {
+        if (params_base.n_ctx_checkpoints <= 0) {
+            return false;
+        }
+
+        // make checkpoints only for completion tasks
+        if (!slot.task || slot.task->type != SERVER_TASK_TYPE_COMPLETION) {
+            return false;
+        }
+
+        // make a checkpoint of the parts of the memory that cannot be rolled back.
+        // checkpoints are created only if:
+        // - the model does not support partial sequence removal
+        // - the model uses SWA (and we are not using `swa_full`)
+        // - the model supports partial sequence removal but only up to a fixed bound
+        return ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+               ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS   ||
+               n_swa > 0;
+    }
+
     void process_single_task(server_task && task) {
         switch (task.type) {
             case SERVER_TASK_TYPE_COMPLETION:
@@ -3128,20 +3148,7 @@ private:
                         alora_disabled_id = enabled_loras[0];
                     }
 
-                    bool do_checkpoint = params_base.n_ctx_checkpoints > 0;
-
-                    // make checkpoints only for completion tasks
-                    do_checkpoint = do_checkpoint && slot.task->type == SERVER_TASK_TYPE_COMPLETION;
-
-                    // make a checkpoint of the parts of the memory that cannot be rolled back.
-                    // checkpoints are created only if:
-                    // - the model does not support partial sequence removal
-                    // - the model uses SWA (and we are not using `swa_full`)
-                    // - the model supports partial sequence removal but only up to a fixed bound
-                    do_checkpoint = do_checkpoint && (
-                            ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
-                            ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
-                            n_swa > 0);
+                    bool do_checkpoint = can_create_context_checkpoint(slot);
 
                     bool has_mtmd = false;
 
@@ -3182,6 +3189,8 @@ private:
                     const int32_t n_before_user = slot.task->params.n_before_user;
                     const bool n_before_user_known = n_before_user > 0;
 
+                    bool force_turn_boundary_checkpoint = false;
+
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.n_tokens < n_batch) {
                         // get next token to process
@@ -3214,6 +3223,7 @@ private:
                         // can be created after the previous messages
                         if (n_before_user_known &&
                             slot.prompt.n_tokens() == n_before_user) {
+                            force_turn_boundary_checkpoint = true;
                             break;
                         }
 
@@ -3234,6 +3244,7 @@ private:
                                 }
                             }
                             if (should_break) {
+                                force_turn_boundary_checkpoint = true;
                                 break;
                             }
                         }
@@ -3273,8 +3284,16 @@ private:
                     // do not checkpoint after mtmd chunks
                     do_checkpoint = do_checkpoint && !has_mtmd;
 
-                    // no need to create checkpoints that are too close together
-                    do_checkpoint = do_checkpoint && (slot.prompt.checkpoints.empty() || n_tokens_start >= slot.prompt.checkpoints.back().n_tokens + params_base.checkpoint_min_step);
+                    const bool has_checkpoints = !slot.prompt.checkpoints.empty();
+                    const bool far_enough_for_regular_checkpoint =
+                        !has_checkpoints || n_tokens_start >= slot.prompt.checkpoints.back().n_tokens + params_base.checkpoint_min_step;
+                    const bool advances_last_checkpoint =
+                        !has_checkpoints || n_tokens_start > slot.prompt.checkpoints.back().n_tokens;
+
+                    // Normal checkpoints keep min-step spacing. Turn-boundary checkpoints are allowed closer
+                    // together so short follow-up prompts can restore near the prompt tail instead of falling
+                    // back thousands of tokens to the previous regular checkpoint.
+                    do_checkpoint = do_checkpoint && (far_enough_for_regular_checkpoint || (force_turn_boundary_checkpoint && advances_last_checkpoint));
                     SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
 
                     // note: we create the checkpoint before calling llama_decode(), so the current batch is not
