@@ -2502,6 +2502,26 @@ private:
                 cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
     }
 
+    bool can_create_context_checkpoint(const server_slot & slot) const {
+        if (params_base.n_ctx_checkpoints <= 0) {
+            return false;
+        }
+
+        // make checkpoints only for completion tasks
+        if (!slot.task || slot.task->type != SERVER_TASK_TYPE_COMPLETION) {
+            return false;
+        }
+
+        // make a checkpoint of the parts of the memory that cannot be rolled back.
+        // checkpoints are created only if:
+        // - the model does not support partial sequence removal
+        // - the model uses SWA (and we are not using `swa_full`)
+        // - the model supports partial sequence removal but only up to a fixed bound
+        return ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+               ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS   ||
+               n_swa > 0;
+    }
+
     void process_single_task(server_task && task) {
         switch (task.type) {
             case SERVER_TASK_TYPE_COMPLETION:
@@ -3573,20 +3593,7 @@ private:
                         alora_disabled_id = enabled_loras[0];
                     }
 
-                    bool do_checkpoint = params_base.n_ctx_checkpoints > 0;
-
-                    // make checkpoints only for completion tasks
-                    do_checkpoint = do_checkpoint && slot.task->type == SERVER_TASK_TYPE_COMPLETION;
-
-                    // make a checkpoint of the parts of the memory that cannot be rolled back.
-                    // checkpoints are created only if:
-                    // - the model does not support partial sequence removal
-                    // - the model uses SWA (and we are not using `swa_full`)
-                    // - the model supports partial sequence removal but only up to a fixed bound
-                    do_checkpoint = do_checkpoint && (
-                            ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
-                            ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
-                            n_swa > 0);
+                    bool do_checkpoint = can_create_context_checkpoint(slot);
 
                     bool has_mtmd = false;
 
@@ -3622,6 +3629,8 @@ private:
                     }
 
                     const auto & spans = slot.task->params.message_spans;
+
+                    bool force_turn_boundary_checkpoint = false;
 
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
@@ -3677,6 +3686,7 @@ private:
                                 }
                             }
                             if (should_break) {
+                                force_turn_boundary_checkpoint = true;
                                 break;
                             }
                         }
