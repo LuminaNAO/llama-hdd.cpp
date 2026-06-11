@@ -75,9 +75,51 @@ static bool slot_ckpt_read(std::ifstream & in, T & value) {
     return in.good();
 }
 
+// Pick which checkpoints a slot save writes to the sidecar. Beyond
+// max_save, older checkpoints are thinned with geometrically growing gaps
+// measured back from the newest: re-prefill after a divergence stays
+// proportional to its depth, while sidecar IO stays O(log n) checkpoints.
+// The newest checkpoint (plain appends) and the earliest one (compaction
+// rewrites everything after the system prompt) are always kept. In-memory
+// checkpoints are not touched.
+static std::vector<const common_prompt_checkpoint *> select_save_checkpoints(
+        const std::list<common_prompt_checkpoint> & checkpoints, int32_t max_save) {
+    std::vector<const common_prompt_checkpoint *> all;
+    all.reserve(checkpoints.size());
+    for (const auto & ck : checkpoints) {
+        all.push_back(&ck);
+    }
+    if (max_save <= 0 || (int32_t) all.size() <= max_save) {
+        return all;
+    }
+
+    std::vector<const common_prompt_checkpoint *> kept;
+    for (llama_pos gap0 = 1; ; gap0 *= 2) {
+        kept.clear();
+        kept.push_back(all.back());
+        llama_pos gap      = gap0;
+        llama_pos last_pos = all.back()->pos_max;
+        for (size_t i = all.size() - 1; i-- > 0; ) {
+            if (last_pos - all[i]->pos_max >= gap) {
+                kept.push_back(all[i]);
+                last_pos = all[i]->pos_max;
+                gap *= 2;
+            }
+        }
+        if (kept.back() != all.front()) {
+            kept.push_back(all.front());
+        }
+        if ((int32_t) kept.size() <= max_save) {
+            break;
+        }
+    }
+    std::reverse(kept.begin(), kept.end()); // file order: oldest first
+    return kept;
+}
+
 static size_t save_slot_checkpoints(
         const std::string & filepath,
-        const std::list<common_prompt_checkpoint> & checkpoints) {
+        const std::vector<const common_prompt_checkpoint *> & checkpoints) {
     const std::string sidecar = slot_ckpt_sidecar_path(filepath);
     std::ofstream out(sidecar, std::ios::binary | std::ios::trunc);
     if (!out.good()) {
@@ -95,7 +137,8 @@ static size_t save_slot_checkpoints(
     }
 
     size_t total = sizeof(magic) + sizeof(count);
-    for (const auto & ck : checkpoints) {
+    for (const auto * ck_ptr : checkpoints) {
+        const auto & ck = *ck_ptr;
         const int32_t  pos_min  = ck.pos_min;
         const int32_t  pos_max  = ck.pos_max;
         const int64_t  n_tokens = ck.n_tokens;
@@ -2717,10 +2760,13 @@ private:
                     const size_t token_count = tokens.size();
                     const size_t nwrite = llama_state_seq_save_file(ctx_tgt, filepath.c_str(), slot->id, tokens.data(), token_count);
 
-                    const size_t nwrite_ckpts = save_slot_checkpoints(filepath, slot->prompt.checkpoints);
+                    const auto ckpts_to_save = select_save_checkpoints(
+                            slot->prompt.checkpoints, params_base.slot_save_max_checkpoints);
+                    const size_t nwrite_ckpts = save_slot_checkpoints(filepath, ckpts_to_save);
                     if (!slot->prompt.checkpoints.empty()) {
-                        SLT_INF(*slot, "saved %zu context checkpoint(s), sidecar size = %.3f MiB\n",
-                                slot->prompt.checkpoints.size(), (float) nwrite_ckpts / 1024 / 1024);
+                        SLT_INF(*slot, "saved %zu/%zu context checkpoint(s), sidecar size = %.3f MiB\n",
+                                ckpts_to_save.size(), slot->prompt.checkpoints.size(),
+                                (float) nwrite_ckpts / 1024 / 1024);
                     }
 
                     const int64_t t_end = ggml_time_us();

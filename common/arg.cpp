@@ -1575,6 +1575,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"-ssmc", "--slot-save-max-checkpoints"}, "N",
+        string_format("max context checkpoints written per slot save; older ones thinned geometrically, newest and earliest always kept (default: %d, 0 = save all)", params.slot_save_max_checkpoints),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("slot-save-max-checkpoints must be non-negative");
+            }
+            params.slot_save_max_checkpoints = value;
+        }
+    ).set_env("LLAMA_ARG_SLOT_SAVE_MAX_CHECKPOINTS").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"-cram", "--cache-ram"}, "N",
         string_format("set the maximum cache size in MiB (default: %d, -1 - no limit, 0 - disable)"
             "[(more info)](https://github.com/ggml-org/llama.cpp/pull/16391)", params.cache_ram_mib),
