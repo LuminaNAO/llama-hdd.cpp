@@ -2200,7 +2200,7 @@ private:
     }
 
     // n_tokens_cur: the number of tokens added to the batch for the current slot
-    void create_checkpoint(server_slot & slot, const int64_t n_tokens_cur, llama_pos pos_min, llama_pos pos_max) {
+    void create_checkpoint(server_slot & slot, const int64_t n_tokens_cur, llama_pos pos_min, llama_pos pos_max, const char * reason = "regular") {
         while (slot.prompt.checkpoints.size() >= (size_t) params_base.n_ctx_checkpoints) {
             // make room for the new checkpoint, if needed
             const auto & cur = slot.prompt.checkpoints.front();
@@ -2219,8 +2219,8 @@ private:
         cur.update_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
 
         SLT_INF(slot,
-                "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
-                (int) slot.prompt.checkpoints.size(), params_base.n_ctx_checkpoints, cur.pos_min,
+                "created context checkpoint %d of %d (reason = %s, pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
+                (int) slot.prompt.checkpoints.size(), params_base.n_ctx_checkpoints, reason, cur.pos_min,
                 cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
     }
 
@@ -3047,10 +3047,11 @@ private:
                                         slot.prompt.checkpoints.rbegin(),
                                         slot.prompt.checkpoints.rend(),
                                         [&, func_name = __func__](const auto & cur) {
-                                            // guarantee that a checkpoint will result in at least one token being processed [TAG_PROMPT_LOGITS]
+                                            // Exact-boundary checkpoints are valid. If they restore the entire prompt,
+                                            // TAG_PROMPT_LOGITS below backs n_past up by one so logits are evaluated.
                                             LOG_INF("slot %12.*s: id %2d | task %d | Checking checkpoint with [%d, %d] against %d...\n", 12,
                                                 func_name, (slot).id, ((slot).task ? (slot).task->id : -1), cur.pos_min, cur.pos_max, pos_min_thold);
-                                            return cur.pos_min < pos_min_thold || cur.pos_min == 0;
+                                            return cur.pos_min <= pos_min_thold;
                                         }
                                     );
 
@@ -3227,27 +3228,9 @@ private:
                             break;
                         }
 
-                        // process the last few tokens of the prompt separately in order to allow for a checkpoint to be created.
-                        // create checkpoints that many tokens before the end of the prompt:
-                        //  - 4 + n_ubatch
-                        //  - 4
-                        // ref: https://github.com/ggml-org/llama.cpp/pull/20288
-                        if (do_checkpoint) {
-                            static const int checkpoint_offsets[] = {4 + n_ubatch, 4};
-
-                            bool should_break = false;
-                            for (int offset : checkpoint_offsets) {
-                                const int n_last = std::min(n_batch, offset);
-                                if (slot.task->n_tokens() == slot.prompt.n_tokens() + n_last) {
-                                    should_break = true;
-                                    break;
-                                }
-                            }
-                            if (should_break) {
-                                force_turn_boundary_checkpoint = true;
-                                break;
-                            }
-                        }
+                        // Keep the final prompt tail in one batch. A post-decode checkpoint is created
+                        // immediately after the prompt finishes, so splitting at 4 + n_ubatch / 4 only
+                        // adds latency and duplicate near-tail checkpoints for follow-up turns.
                     }
 
                     // the number of tokens added to the batch for the current slot
@@ -3299,7 +3282,8 @@ private:
                     // note: we create the checkpoint before calling llama_decode(), so the current batch is not
                     //       yet processed and therefore it is not part of the checkpoint.
                     if (do_checkpoint) {
-                        create_checkpoint(slot, n_tokens_cur, pos_min, pos_max);
+                        create_checkpoint(slot, n_tokens_cur, pos_min, pos_max,
+                                force_turn_boundary_checkpoint ? "before-user" : "regular");
                     }
                 }
 
@@ -3523,6 +3507,21 @@ private:
                     }
 
                     GGML_ASSERT(slot.task->need_sampling());
+
+                    if (can_create_context_checkpoint(slot)) {
+                        const bool has_checkpoints = !slot.prompt.checkpoints.empty();
+                        const bool advances_last_checkpoint =
+                            !has_checkpoints || slot.prompt.n_tokens() > slot.prompt.checkpoints.back().n_tokens;
+
+                        if (advances_last_checkpoint) {
+                            const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
+                            const auto pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
+
+                            if (pos_min >= 0) {
+                                create_checkpoint(slot, 0, pos_min, pos_max, "prompt-tail");
+                            }
+                        }
+                    }
 
                     // prompt evaluated for next-token prediction
                     slot.state = SLOT_STATE_GENERATING;
