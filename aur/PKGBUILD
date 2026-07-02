@@ -1,7 +1,7 @@
 # Maintainer: Lumina Nao <luminanao@duck.com>
 
 pkgname=llama-hdd
-pkgver=b9554.hdd
+pkgver=v1
 pkgrel=1
 pkgdesc="LLM inference in C/C++ with disk-backed prompt-checkpoint persistence (llama.cpp soft-fork)"
 arch=('x86_64' 'aarch64')
@@ -26,9 +26,7 @@ _backend="${LLAMA_HDD_BACKEND:-cpu}"
 
 pkgver() {
     cd "$pkgname"
-    # b<NNNN>.r<commits-since-tag>
-    git describe --tags --abbrev=0 | sed 's/^b/b/' \
-        | awk -v n="$(git rev-list --count HEAD ^"$(git describe --tags --abbrev=0)")" '{print $1 ".r" n}'
+    git describe --tags --abbrev=0 | sed 's/^v//'
 }
 
 build() {
