@@ -3717,6 +3717,11 @@ private:
 
                     bool force_turn_boundary_checkpoint = false;
 
+                    // where this batch starts filling; checkpoints created for a turn-boundary
+                    // split land here (one pass lagged), so min-step gating must consider it
+                    // in addition to the last recorded checkpoint
+                    const int32_t n_tokens_fill_start = slot.prompt.n_tokens();
+
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
                         // get next token to process
@@ -3744,12 +3749,24 @@ private:
 
                         slot.n_prompt_tokens_processed++;
 
-                        // break at the last user message, or at user messages at least min step past the last checkpoint
+                        // break at the last user message, or at user messages at least min step past the
+                        // last checkpoint. Keep min-step spacing here too: without it a cold prefill of a
+                        // many-turn transcript fragments into per-message micro-batches and checkpoints at
+                        // every boundary, each one copying and thinning the KV state. Gate against both the
+                        // last checkpoint and the current batch fill start (checkpoint creation lags the
+                        // split by one batch). The prompt-tail checkpoint after decode still covers
+                        // near-tail restores for follow-up turns.
                         if (do_checkpoint && spans.is_user_start(slot.prompt.n_tokens())) {
                             const auto pos = slot.prompt.n_tokens();
                             const auto & checkpoints = slot.prompt.checkpoints;
 
-                            if (pos == last_user_pos || checkpoints.empty() || pos > checkpoints.back().n_tokens + params_base.checkpoint_min_step) {
+                            const bool boundary_far_enough =
+                                pos >= n_tokens_fill_start + params_base.checkpoint_min_step &&
+                                (checkpoints.empty() ||
+                                 pos >= checkpoints.back().n_tokens + params_base.checkpoint_min_step);
+
+                            if (pos == last_user_pos || boundary_far_enough) {
+                                force_turn_boundary_checkpoint = true;
                                 break;
                             }
                         }
