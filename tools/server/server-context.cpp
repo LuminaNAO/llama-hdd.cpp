@@ -3677,6 +3677,8 @@ private:
 
                     const auto & spans = slot.task->params.message_spans;
 
+                    const auto last_user_pos = spans.last_user_message_pos();
+
                     bool force_turn_boundary_checkpoint = false;
 
                     // where this batch starts filling; checkpoints created for a turn-boundary
@@ -3742,6 +3744,10 @@ private:
                     const auto n_tokens_cur = batch.size() - n_tokens_prev;
 
                     const auto n_tokens_start = slot.prompt.n_tokens() - n_tokens_cur;
+
+                    const bool near_prompt_end = slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch;
+
+                    const bool is_last_user_message = n_tokens_start == last_user_pos;
 
                     // entire prompt has been processed
                     if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
