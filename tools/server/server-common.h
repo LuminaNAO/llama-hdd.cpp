@@ -206,6 +206,15 @@ public:
 
     llama_tokens get_text_tokens() const;
 
+    // like get_tokens(), but also allowed when media is present: keeps the
+    // LLAMA_TOKEN_NULL placeholders so the array stays 1-to-1 with the KV cells
+    const llama_tokens & get_raw_tokens() const { return tokens; }
+
+    // re-attach a media chunk to an already-inserted run of LLAMA_TOKEN_NULL.
+    // copies the chunk. returns false if idx does not start such a run of the
+    // chunk's length, which would desync the token list from the media map
+    bool set_media_chunk(size_t idx, const mtmd_input_chunk * chunk);
+
     // for compatibility with speculative decoding
     void set_token(llama_pos pos, llama_token id);
 

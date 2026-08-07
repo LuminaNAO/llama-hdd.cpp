@@ -1896,6 +1896,57 @@ mtmd_input_chunk * mtmd_input_chunk_copy(const mtmd_input_chunk * chunk) {
     return copy;
 }
 
+bool mtmd_input_chunk_get_shape(const mtmd_input_chunk * chunk, mtmd_chunk_shape * out_shape) {
+    if (!chunk || !out_shape) {
+        return false;
+    }
+    *out_shape = {};
+    if (chunk->type == MTMD_INPUT_CHUNK_TYPE_IMAGE && chunk->tokens_image) {
+        const auto & img = *chunk->tokens_image;
+        out_shape->nx               = img.nx;
+        out_shape->ny               = img.ny;
+        out_shape->nz               = img.batch_f32.entries.size();
+        out_shape->pos_type         = (uint32_t) img.pos;
+        out_shape->image_idx        = img.image_idx;
+        out_shape->n_temporal_merge = img.n_temporal_merge;
+        return true;
+    }
+    if (chunk->type == MTMD_INPUT_CHUNK_TYPE_AUDIO && chunk->tokens_audio) {
+        out_shape->n_tokens_audio = chunk->tokens_audio->n_tokens;
+        return true;
+    }
+    return false;
+}
+
+mtmd_input_chunk * mtmd_input_chunk_init_placeholder(mtmd_input_chunk_type type,
+                                                     const char * id,
+                                                     const mtmd_chunk_shape * shape) {
+    if (!shape || (type != MTMD_INPUT_CHUNK_TYPE_IMAGE && type != MTMD_INPUT_CHUNK_TYPE_AUDIO)) {
+        return nullptr;
+    }
+
+    mtmd_input_chunk * chunk = new mtmd_input_chunk{ type, {}, nullptr, nullptr };
+
+    if (type == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
+        chunk->tokens_image = mtmd_image_tokens_ptr(new mtmd_image_tokens());
+        chunk->tokens_image->nx               = shape->nx;
+        chunk->tokens_image->ny               = shape->ny;
+        chunk->tokens_image->pos              = (mtmd_pos_type) shape->pos_type;
+        chunk->tokens_image->image_idx        = shape->image_idx;
+        chunk->tokens_image->n_temporal_merge = shape->n_temporal_merge;
+        chunk->tokens_image->id               = id ? id : "";
+        // entries stay default-constructed: empty buf marks them as placeholders,
+        // but n_tokens() still counts them for the nz term
+        chunk->tokens_image->batch_f32.entries.resize(shape->nz);
+    } else {
+        chunk->tokens_audio = mtmd_audio_tokens_ptr(new mtmd_audio_tokens());
+        chunk->tokens_audio->n_tokens = shape->n_tokens_audio;
+        chunk->tokens_audio->id       = id ? id : "";
+    }
+
+    return chunk;
+}
+
 void mtmd_input_chunk_free(mtmd_input_chunk * chunk) {
     if (chunk) {
         delete chunk;

@@ -244,6 +244,262 @@ static size_t load_slot_checkpoints(
     return total;
 }
 
+// Slot media sidecar persistence.
+// llama_state_seq_save_file persists the KV cells for media (positions and
+// M-RoPE extents included), but the prompt it stores is a flat token array with
+// no room for the chunk map that server_tokens keeps alongside it. Persist that
+// map in a sidecar so a restored slot can match media by id again.
+//
+// Only shape and id are stored, never the media itself: that is all
+// get_common_prefix() compares, and the encoded result is already in the KV.
+// Chunks rebuilt from this sidecar are placeholders and cannot be encoded; a
+// prompt that diverges at a chunk re-encodes from the request instead.
+//
+// Sidecar format (LSMEDIA1):
+//   magic[8] = "LSMEDIA1"
+//   n_tokens       : uint64  (idx-space length of the saved prompt)
+//   mmproj_size    : uint64  (preprocessing fingerprint, see below)
+//   image_min_tok  : int32
+//   image_max_tok  : int32
+//   mmproj_len     : uint32
+//   mmproj[mmproj_len]
+//   count          : uint64
+//   for each chunk:
+//     start_idx : uint64
+//     type      : uint32
+//     shape     : mtmd_chunk_shape (7 x uint32)
+//     id_len    : uint32
+//     id[id_len]
+//
+// The fingerprint exists because chunk ids are content hashes but token counts
+// are not: the same image tokenizes to a different shape if the projector or
+// the image token bounds change. Restoring against a mismatched fingerprint
+// would splice wrongly-shaped KV into a live slot, so a mismatch is fatal here.
+static std::string slot_media_sidecar_path(const std::string & filepath) {
+    return filepath + ".media";
+}
+
+static bool slot_media_write_str(std::ofstream & out, const std::string & s) {
+    const uint32_t len = s.size();
+    if (!slot_ckpt_write(out, len)) {
+        return false;
+    }
+    out.write(s.data(), len);
+    return out.good();
+}
+
+static bool slot_media_read_str(std::ifstream & in, std::string & s) {
+    uint32_t len = 0;
+    if (!slot_ckpt_read(in, len)) {
+        return false;
+    }
+    s.resize(len);
+    if (len > 0) {
+        in.read(s.data(), len);
+    }
+    return in.good();
+}
+
+static uint64_t slot_media_mmproj_size(const common_params & params) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(params.mmproj.path, ec);
+    return ec ? 0 : (uint64_t) size;
+}
+
+static size_t save_slot_media(
+        const std::string & filepath,
+        const server_tokens & tokens,
+        const common_params & params) {
+    const std::string sidecar = slot_media_sidecar_path(filepath);
+
+    if (!tokens.has_media()) {
+        std::error_code ec;
+        std::filesystem::remove(sidecar, ec); // a stale sidecar would outlive its prompt
+        return 0;
+    }
+
+    std::ofstream out(sidecar, std::ios::binary | std::ios::trunc);
+    if (!out.good()) {
+        LOG_WRN("%s: failed to open media sidecar for write: %s\n", __func__, sidecar.c_str());
+        return 0;
+    }
+
+    const char magic[8] = { 'L', 'S', 'M', 'E', 'D', 'I', 'A', '1' };
+    out.write(magic, sizeof(magic));
+
+    const uint64_t n_tokens     = tokens.size();
+    const uint64_t mmproj_size  = slot_media_mmproj_size(params);
+    const int32_t  image_min    = params.image_min_tokens;
+    const int32_t  image_max    = params.image_max_tokens;
+
+    if (!slot_ckpt_write(out, n_tokens)    ||
+        !slot_ckpt_write(out, mmproj_size) ||
+        !slot_ckpt_write(out, image_min)   ||
+        !slot_ckpt_write(out, image_max)   ||
+        !slot_media_write_str(out, params.mmproj.path)) {
+        return 0;
+    }
+
+    std::vector<std::pair<uint64_t, const mtmd_input_chunk *>> media;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tokens[i] != LLAMA_TOKEN_NULL) {
+            continue;
+        }
+        try {
+            const auto & chunk = tokens.find_chunk(i);
+            media.emplace_back(i, chunk.get());
+            i += mtmd_input_chunk_get_n_tokens(chunk.get()) - 1;
+        } catch (const std::exception &) {
+            LOG_WRN("%s: media placeholder at idx %zu has no chunk, not saving\n", __func__, i);
+            return 0;
+        }
+    }
+
+    const uint64_t count = media.size();
+    if (!slot_ckpt_write(out, count)) {
+        return 0;
+    }
+
+    for (const auto & [start_idx, chunk] : media) {
+        mtmd_chunk_shape shape;
+        if (!mtmd_input_chunk_get_shape(chunk, &shape)) {
+            LOG_WRN("%s: media chunk at idx %" PRIu64 " has no shape\n", __func__, start_idx);
+            return 0;
+        }
+
+        const uint32_t type = (uint32_t) mtmd_input_chunk_get_type(chunk);
+        const char * id     = mtmd_input_chunk_get_id(chunk);
+
+        if (!slot_ckpt_write(out, start_idx) ||
+            !slot_ckpt_write(out, type)      ||
+            !slot_ckpt_write(out, shape)     ||
+            !slot_media_write_str(out, id ? id : "")) {
+            return 0;
+        }
+    }
+
+    const auto written = out.tellp();
+    if (!out.good() || written <= 0) {
+        return 0;
+    }
+
+    return (size_t) written;
+}
+
+static bool apply_slot_media_sidecar(
+        const std::string & sidecar,
+        server_tokens & tokens,
+        const common_params & params) {
+    std::ifstream in(sidecar, std::ios::binary);
+    if (!in.good()) {
+        LOG_WRN("%s: failed to open media sidecar for read: %s\n", __func__, sidecar.c_str());
+        return false;
+    }
+
+    char magic[8] = {};
+    in.read(magic, sizeof(magic));
+    const char expected[8] = { 'L', 'S', 'M', 'E', 'D', 'I', 'A', '1' };
+    if (!in.good() || std::memcmp(magic, expected, sizeof(magic)) != 0) {
+        LOG_WRN("%s: invalid or stale media sidecar (expected LSMEDIA1): %s\n", __func__, sidecar.c_str());
+        return false;
+    }
+
+    uint64_t    n_tokens    = 0;
+    uint64_t    mmproj_size = 0;
+    int32_t     image_min   = 0;
+    int32_t     image_max   = 0;
+    std::string mmproj_path;
+
+    if (!slot_ckpt_read(in, n_tokens)    ||
+        !slot_ckpt_read(in, mmproj_size) ||
+        !slot_ckpt_read(in, image_min)   ||
+        !slot_ckpt_read(in, image_max)   ||
+        !slot_media_read_str(in, mmproj_path)) {
+        return false;
+    }
+
+    if (mmproj_path != params.mmproj.path      ||
+        mmproj_size != slot_media_mmproj_size(params) ||
+        image_min   != params.image_min_tokens ||
+        image_max   != params.image_max_tokens) {
+        LOG_WRN("%s: media sidecar was written under different preprocessing settings, discarding: %s\n",
+                __func__, sidecar.c_str());
+        return false;
+    }
+
+    if (n_tokens != tokens.size()) {
+        LOG_WRN("%s: media sidecar length %" PRIu64 " does not match restored prompt length %zu: %s\n",
+                __func__, n_tokens, tokens.size(), sidecar.c_str());
+        return false;
+    }
+
+    uint64_t count = 0;
+    if (!slot_ckpt_read(in, count)) {
+        return false;
+    }
+
+    for (uint64_t i = 0; i < count; ++i) {
+        uint64_t         start_idx = 0;
+        uint32_t         type      = 0;
+        mtmd_chunk_shape shape;
+        std::string      id;
+
+        if (!slot_ckpt_read(in, start_idx) ||
+            !slot_ckpt_read(in, type)      ||
+            !slot_ckpt_read(in, shape)     ||
+            !slot_media_read_str(in, id)) {
+            return false;
+        }
+
+        mtmd::input_chunk_ptr chunk(mtmd_input_chunk_init_placeholder(
+                    (mtmd_input_chunk_type) type, id.c_str(), &shape));
+        if (!chunk) {
+            LOG_WRN("%s: media sidecar has an unusable chunk at idx %" PRIu64 ": %s\n",
+                    __func__, start_idx, sidecar.c_str());
+            return false;
+        }
+
+        if (!tokens.set_media_chunk(start_idx, chunk.get())) {
+            LOG_WRN("%s: media sidecar chunk at idx %" PRIu64 " does not match the restored prompt: %s\n",
+                    __func__, start_idx, sidecar.c_str());
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// returns false when the restored prompt cannot be trusted, in which case the
+// caller must drop the KV rather than serve from it
+static bool load_slot_media(
+        const std::string & filepath,
+        server_tokens & tokens,
+        const common_params & params) {
+    const std::string sidecar = slot_media_sidecar_path(filepath);
+
+    if (std::filesystem::exists(sidecar) && !apply_slot_media_sidecar(sidecar, tokens, params)) {
+        return false;
+    }
+
+    // a placeholder with no chunk behind it would leave the token list out of
+    // sync with the KV cells, so treat any uncovered one as a failed restore
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tokens[i] != LLAMA_TOKEN_NULL) {
+            continue;
+        }
+        try {
+            const auto & chunk = tokens.find_chunk(i);
+            i += mtmd_input_chunk_get_n_tokens(chunk.get()) - 1;
+        } catch (const std::exception &) {
+            LOG_WRN("%s: restored prompt has a media placeholder at idx %zu with no chunk: %s\n",
+                    __func__, i, sidecar.c_str());
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static uint32_t server_n_outputs_max(const common_params & params) {
     const uint32_t n_batch  = params.n_batch;
 
@@ -2270,18 +2526,6 @@ private:
         queue_results.send(std::move(res));
     }
 
-    // Gate slot save/restore/erase on slot content (does it hold media),
-    // not model capability: a multimodal model may hold a pure-text slot.
-    bool check_slot_no_media(const server_slot & slot, const int id_task) {
-        if (slot.prompt.tokens.has_media()) {
-            send_error(id_task,
-                "This operation is not supported while the slot holds image/audio tokens (a pure-text prefix is supported)",
-                ERROR_TYPE_NOT_SUPPORTED);
-            return false;
-        }
-        return true;
-    }
-
     void send_partial_response(server_slot & slot, const completion_token_output & tkn, bool is_progress, bool is_begin = false) {
         auto res = std::make_unique<server_task_result_cmpl_partial>();
 
@@ -2790,9 +3034,6 @@ private:
                         send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
                         break;
                     }
-                    if (!check_slot_no_media(*slot, task.id)) {
-                        break;
-                    }
                     if (slot->is_processing()) {
                         // if requested slot is unavailable, we defer this task for processing later
                         SRV_DBG("requested slot is unavailable, defer task, id_task = %d\n", task.id);
@@ -2805,9 +3046,21 @@ private:
                     std::string filename = task.slot_action.filename;
                     std::string filepath = task.slot_action.filepath;
 
-                    const llama_tokens tokens = slot->prompt.tokens.get_text_tokens();
+                    // keeps the media placeholders, so the array stays 1-to-1 with the KV cells
+                    const llama_tokens & tokens = slot->prompt.tokens.get_raw_tokens();
                     const size_t token_count = tokens.size();
                     const size_t nwrite = llama_state_seq_save_file(ctx_tgt, filepath.c_str(), slot->id, tokens.data(), token_count);
+
+                    const size_t nwrite_media = save_slot_media(filepath, slot->prompt.tokens, params_base);
+                    if (slot->prompt.tokens.has_media() && nwrite_media == 0) {
+                        // the state file alone cannot describe this prompt, so it must not
+                        // be advertised as saved
+                        send_error(task, "Slot state was written but its media sidecar could not be, the save is unusable", ERROR_TYPE_SERVER);
+                        break;
+                    }
+                    if (nwrite_media > 0) {
+                        SLT_INF(*slot, "saved media sidecar, size = %zu B\n", nwrite_media);
+                    }
 
                     const auto ckpts_to_save = select_save_checkpoints(
                             slot->prompt.checkpoints, params_base.slot_save_max_checkpoints);
@@ -2864,6 +3117,13 @@ private:
                     slot->prompt.clear();
                     slot->prompt.tokens.insert(tokens);
 
+                    if (!load_slot_media(filepath, slot->prompt.tokens, params_base)) {
+                        // the KV holds media the prompt can no longer describe
+                        slot->prompt_clear();
+                        send_error(task, "Unable to restore slot, its media sidecar is missing or does not apply", ERROR_TYPE_INVALID_REQUEST);
+                        break;
+                    }
+
                     slot->prompt.checkpoints.clear();
                     const size_t nread_ckpts = load_slot_checkpoints(filepath, slot->prompt.checkpoints);
                     if (!slot->prompt.checkpoints.empty()) {
@@ -2890,10 +3150,6 @@ private:
                     server_slot * slot = get_slot_by_id(id_slot);
                     if (slot == nullptr) {
                         send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
-                        break;
-                    }
-                    // Gate on slot content, consistent with save/restore.
-                    if (!check_slot_no_media(*slot, task.id)) {
                         break;
                     }
                     if (slot->is_processing()) {

@@ -232,6 +232,27 @@ MTMD_API llama_pos                  mtmd_input_chunk_get_n_pos       (const mtmd
 MTMD_API mtmd_input_chunk * mtmd_input_chunk_copy(const mtmd_input_chunk * chunk);
 MTMD_API void               mtmd_input_chunk_free(mtmd_input_chunk * chunk);
 
+// shape of a media chunk, enough to reproduce its token and position counts
+// without the media data itself. obtained via mtmd_input_chunk_get_shape()
+struct mtmd_chunk_shape {
+    uint32_t nx;
+    uint32_t ny;
+    uint32_t nz;               // number of preprocessed entries (frames/slices)
+    uint32_t pos_type;         // opaque, see mtmd_pos_type
+    uint32_t image_idx;
+    uint32_t n_temporal_merge;
+    uint32_t n_tokens_audio;   // audio only; images derive n_tokens from the fields above
+};
+
+// get/rebuild the shape of a media chunk. returns false for text chunks.
+// a chunk rebuilt via mtmd_input_chunk_init_placeholder carries no media data:
+// it reports the same type, id, n_tokens and n_pos as the original, which is all
+// that KV cache prefix matching needs, but it can never be encoded. this exists
+// so callers persisting a KV cache can restore their chunk map without the media.
+MTMD_API bool                mtmd_input_chunk_get_shape(const mtmd_input_chunk * chunk, struct mtmd_chunk_shape * out_shape);
+MTMD_API mtmd_input_chunk *  mtmd_input_chunk_init_placeholder(enum mtmd_input_chunk_type type,
+                                                               const char * id,
+                                                               const struct mtmd_chunk_shape * shape);
 
 // mtmd_image_tokens
 //

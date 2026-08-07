@@ -403,6 +403,30 @@ void server_tokens::insert(const llama_tokens & inp_tokens) {
     tokens.insert(tokens.end(), inp_tokens.begin(), inp_tokens.end());
 }
 
+bool server_tokens::set_media_chunk(size_t idx, const mtmd_input_chunk * chunk) {
+    if (!has_mtmd) {
+        return false; // restoring media into a text-only context
+    }
+
+    const auto type = mtmd_input_chunk_get_type(chunk);
+    if (type != MTMD_INPUT_CHUNK_TYPE_IMAGE && type != MTMD_INPUT_CHUNK_TYPE_AUDIO) {
+        return false;
+    }
+
+    const size_t n_tokens = mtmd_input_chunk_get_n_tokens(chunk);
+    if (n_tokens == 0 || idx + n_tokens > tokens.size()) {
+        return false;
+    }
+    for (size_t i = idx; i < idx + n_tokens; ++i) {
+        if (tokens[i] != LLAMA_TOKEN_NULL) {
+            return false;
+        }
+    }
+
+    map_idx_to_media[idx] = mtmd::input_chunk_ptr(mtmd_input_chunk_copy(chunk));
+    return true;
+}
+
 const llama_tokens & server_tokens::get_tokens() const {
     GGML_ASSERT(!has_mtmd);
     return tokens;
