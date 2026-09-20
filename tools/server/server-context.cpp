@@ -3699,7 +3699,22 @@ private:
 
                     SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
 
-                    slot.mem.seq_rm(slot.id, p0, -1);
+                    if (p0 > 0 && ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL) {
+                        // partial removal is not supported on this memory (e.g.
+                        // hybrid without speculative decoding) - when a stale tail
+                        // exists, reset the slot instead of aborting in seq_rm
+                        const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
+                        if (pos_max >= p0) {
+                            SLT_WRN(slot, "partial sequence removal not supported, resetting slot (p0 = %d)\n", p0);
+                            slot.mem.seq_rm(slot.id, 0, -1);
+                            slot.prompt.tokens.keep_first(0);
+                            slot.prompt.checkpoints.clear();
+                            // nothing is cached after the reset
+                            slot.stats.n_prompt_cached = 0;
+                        }
+                    } else {
+                        slot.mem.seq_rm(slot.id, p0, -1);
+                    }
 
                     // If using an alora, there may be uncached tokens that come
                     // before the invocation sequence. When this happens, the
