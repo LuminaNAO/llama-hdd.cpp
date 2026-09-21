@@ -5,8 +5,8 @@
 # llama-launcher/utils/check-aur-sync.sh must report OK for all packages.
 
 pkgname=llama-hdd
-pkgver=11
-pkgrel=2
+pkgver=12
+pkgrel=1
 pkgdesc="LLM inference in C/C++ with disk-backed prompt-checkpoint persistence (llama.cpp soft-fork)"
 arch=('x86_64' 'aarch64')
 url="https://codeberg.org/LuminaNAO/llama-hdd.cpp"
